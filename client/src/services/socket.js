@@ -6,11 +6,7 @@ export function getSocket() {
   const token = localStorage.getItem('spotify_token');
 
   if (!socket) {
-    // If backend is on port 3000 and Vite proxies or direct:
-    // In dev, connect to port 3000 directly or via window.location.origin
-    const socketUrl = window.location.port === '5173' ? 'http://127.0.0.1:3000' : window.location.origin;
-
-    socket = io(socketUrl, {
+    socket = io(window.location.origin, {
       auth: {
         token: token || '',
       },
@@ -18,7 +14,7 @@ export function getSocket() {
       transports: ['websocket', 'polling'],
       autoConnect: true,
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10,
       reconnectionDelay: 1000,
     });
 
@@ -29,9 +25,19 @@ export function getSocket() {
     socket.on('connect_error', (err) => {
       console.warn('Socket connection error:', err.message);
     });
-  } else if (token && socket.auth?.token !== token) {
-    socket.auth.token = token;
-    socket.disconnect().connect();
+  } else {
+    // Keep auth token fresh
+    const currentToken = socket.auth?.token;
+    if (token && currentToken !== token) {
+      socket.auth.token = token;
+      if (socket.connected) {
+        socket.disconnect().connect();
+      } else {
+        socket.connect();
+      }
+    } else if (!socket.connected) {
+      socket.connect();
+    }
   }
 
   return socket;

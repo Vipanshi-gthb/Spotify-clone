@@ -29,7 +29,14 @@ export default function ListeningRooms() {
   useEffect(() => {
     const socket = getSocket();
 
-    socket.emit('get-public-rooms');
+    const fetchPublicRooms = () => {
+      socket.emit('get-public-rooms');
+    };
+
+    if (socket.connected) {
+      fetchPublicRooms();
+    }
+    socket.on('connect', fetchPublicRooms);
 
     const handleRoomsList = (rooms) => {
       setPublicRooms(rooms || []);
@@ -43,16 +50,23 @@ export default function ListeningRooms() {
       setError(message);
     };
 
+    const handleConnectError = (err) => {
+      console.warn('Socket connect error:', err.message);
+    };
+
     socket.on('public-rooms-list', handleRoomsList);
     socket.on('room-created', handleRoomCreated);
     socket.on('error-message', handleError);
+    socket.on('connect_error', handleConnectError);
 
     return () => {
+      socket.off('connect', fetchPublicRooms);
       socket.off('public-rooms-list', handleRoomsList);
       socket.off('room-created', handleRoomCreated);
       socket.off('error-message', handleError);
+      socket.off('connect_error', handleConnectError);
     };
-  }, [navigate]);
+  }, [navigate, isAuthenticated]);
 
   const handleJoin = (e) => {
     e.preventDefault();
@@ -60,10 +74,13 @@ export default function ListeningRooms() {
       navigate('/login');
       return;
     }
-    const cleanCode = roomCodeInput.trim().toUpperCase();
+    let cleanCode = roomCodeInput.trim().toUpperCase();
     if (!cleanCode) {
       setError('Please enter a room code');
       return;
+    }
+    if (!cleanCode.startsWith('ROOM-') && cleanCode.length === 4) {
+      cleanCode = 'ROOM-' + cleanCode;
     }
     navigate(`/room/${cleanCode}`);
   };

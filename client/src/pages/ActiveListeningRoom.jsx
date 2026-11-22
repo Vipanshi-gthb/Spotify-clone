@@ -57,7 +57,8 @@ export default function ActiveListeningRoom() {
   const [isMuted, setIsMuted] = useState(false);
   const [currentDisplayTime, setCurrentDisplayTime] = useState(0);
 
-  const isHost = room && user && room.hostId === user.id;
+  const currentUserId = user ? ((user.id || user._id)?.toString()) : null;
+  const isHost = Boolean(room && currentUserId && (room.hostId?.toString() === currentUserId));
 
   // Initialize Room Socket Connection
   useEffect(() => {
@@ -67,11 +68,22 @@ export default function ActiveListeningRoom() {
     }
 
     const socket = getSocket();
-    const cleanCode = roomCode ? roomCode.toUpperCase() : '';
+    let cleanCode = roomCode ? roomCode.trim().toUpperCase() : '';
+    if (cleanCode && !cleanCode.startsWith('ROOM-') && cleanCode.length === 4) {
+      cleanCode = 'ROOM-' + cleanCode;
+    }
 
-    socket.emit('join-room', { roomCode: cleanCode });
+    const emitJoin = () => {
+      socket.emit('join-room', { roomCode: cleanCode });
+    };
+
+    if (socket.connected) {
+      emitJoin();
+    }
+    socket.on('connect', emitJoin);
 
     const handleRoomState = (state) => {
+      setError(null);
       setRoom(state);
       setMessages(state.messages || []);
       syncAudioWithPlayback(state.playback);
@@ -137,6 +149,7 @@ export default function ActiveListeningRoom() {
       .catch((err) => console.warn('Failed to load songs for queue:', err));
 
     return () => {
+      socket.off('connect', emitJoin);
       socket.emit('leave-room');
       socket.off('room-state', handleRoomState);
       socket.off('playback-update', handlePlaybackUpdate);
@@ -211,11 +224,14 @@ export default function ActiveListeningRoom() {
     const playback = room.playback;
 
     if (playback.isPlaying) {
-      socket.emit('pause-song', { position: roomAudioRef.current.currentTime });
+      if (roomAudioRef.current) {
+        roomAudioRef.current.pause();
+      }
+      socket.emit('pause-song', { position: roomAudioRef.current ? roomAudioRef.current.currentTime : 0 });
     } else {
       socket.emit('play-song', {
         song: playback.currentSong,
-        position: roomAudioRef.current.currentTime,
+        position: roomAudioRef.current ? roomAudioRef.current.currentTime : 0,
       });
     }
   };
@@ -428,7 +444,7 @@ export default function ActiveListeningRoom() {
                 type="button"
                 className="room-main-play-btn"
                 onClick={handleHostTogglePlay}
-                disabled={!isHost && !currentSong}
+                disabled={!isHost || !currentSong}
                 title={isHost ? (isPlaying ? 'Pause' : 'Play') : 'Host controls playback'}
               >
                 {isPlaying ? (
@@ -566,7 +582,7 @@ export default function ActiveListeningRoom() {
                 </div>
               ) : (
                 messages.map((m) => {
-                  const isMine = user && m.senderId === user.id;
+                  const isMine = Boolean(currentUserId && m.senderId?.toString() === currentUserId);
                   const timeFormatted = m.timestamp
                     ? new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                     : '';

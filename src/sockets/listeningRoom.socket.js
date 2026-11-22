@@ -73,27 +73,37 @@ function initListeningRoomsSocket(io) {
             }
 
             if (!token) {
-                return next(new Error("Authentication error: No token provided."));
+                socket.user = null;
+                return next();
             }
 
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            const user = await userModel.findById(decoded.id).select("-password");
-
-            if (!user) {
-                return next(new Error("Authentication error: User not found."));
+            if (typeof token === "string" && token.startsWith("Bearer ")) {
+                token = token.slice(7).trim();
             }
 
-            socket.user = {
-                id: user._id.toString(),
-                username: user.username,
-                email: user.email,
-                role: user.role
-            };
+            try {
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                const user = await userModel.findById(decoded.id).select("-password");
+
+                if (user) {
+                    socket.user = {
+                        id: user._id.toString(),
+                        username: user.username,
+                        email: user.email,
+                        role: user.role
+                    };
+                } else {
+                    socket.user = null;
+                }
+            } catch (jwtErr) {
+                socket.user = null;
+            }
 
             next();
         } catch (err) {
-            console.error("Socket authentication failed:", err.message);
-            return next(new Error("Authentication error: " + err.message));
+            console.error("Socket authentication middleware error:", err.message);
+            socket.user = null;
+            next();
         }
     });
 
@@ -103,6 +113,9 @@ function initListeningRoomsSocket(io) {
 
         // 1. CREATE ROOM
         socket.on("create-room", ({ roomName }) => {
+            if (!user) {
+                return socket.emit("error-message", { message: "Please log in to host a listening room." });
+            }
             try {
                 let roomCode = generateRoomCode();
                 while (activeRooms.has(roomCode)) {
@@ -149,12 +162,25 @@ function initListeningRoomsSocket(io) {
 
         // 2. JOIN ROOM
         socket.on("join-room", ({ roomCode }) => {
+            if (!user) {
+                return socket.emit("error-message", { message: "Please log in to join a listening room." });
+            }
             try {
-                const code = roomCode ? roomCode.trim().toUpperCase() : "";
+                let code = roomCode ? roomCode.trim().toUpperCase() : "";
+                if (code && !code.startsWith("ROOM-") && code.length === 4) {
+                    code = "ROOM-" + code;
+                }
+
                 const room = activeRooms.get(code);
 
                 if (!room) {
                     return socket.emit("error-message", { message: `Room "${code}" not found. Please verify the room code.` });
+                }
+
+                // Cancel pending cleanup if any
+                if (room.cleanupTimer) {
+                    clearTimeout(room.cleanupTimer);
+                    delete room.cleanupTimer;
                 }
 
                 // If already in a room, leave old one first
@@ -165,7 +191,7 @@ function initListeningRoomsSocket(io) {
                 currentRoomCode = code;
                 socket.join(code);
 
-                const isHost = room.hostId === user.id;
+                const isHost = room.hostId?.toString() === user.id?.toString();
 
                 room.participants.set(socket.id, {
                     socketId: socket.id,
@@ -210,7 +236,7 @@ function initListeningRoomsSocket(io) {
             const room = activeRooms.get(currentRoomCode);
             if (!room) return;
 
-            if (room.hostId !== user.id) {
+            if (room.hostId?.toString() !== user.id?.toString()) {
                 return socket.emit("error-message", { message: "Only the host can control playback." });
             }
 
@@ -232,7 +258,7 @@ function initListeningRoomsSocket(io) {
             const room = activeRooms.get(currentRoomCode);
             if (!room) return;
 
-            if (room.hostId !== user.id) {
+            if (room.hostId?.toString() !== user.id?.toString()) {
                 return socket.emit("error-message", { message: "Only the host can pause playback." });
             }
 
@@ -249,7 +275,7 @@ function initListeningRoomsSocket(io) {
             const room = activeRooms.get(currentRoomCode);
             if (!room) return;
 
-            if (room.hostId !== user.id) {
+            if (room.hostId?.toString() !== user.id?.toString()) {
                 return socket.emit("error-message", { message: "Only the host can seek audio." });
             }
 
@@ -263,7 +289,7 @@ function initListeningRoomsSocket(io) {
         socket.on("next-song", () => {
             if (!currentRoomCode) return;
             const room = activeRooms.get(currentRoomCode);
-            if (!room || room.hostId !== user.id) return;
+            if (!room || room.hostId?.toString() !== user.id?.toString()) return;
 
             if (room.playback.queue.length > 0) {
                 const nextIdx = room.playback.queueIndex + 1;
@@ -287,7 +313,7 @@ function initListeningRoomsSocket(io) {
         socket.on("previous-song", () => {
             if (!currentRoomCode) return;
             const room = activeRooms.get(currentRoomCode);
-            if (!room || room.hostId !== user.id) return;
+            if (!room || room.hostId?.toString() !== user.id?.toString()) return;
 
             if (room.playback.queue.length > 0) {
                 const prevIdx = room.playback.queueIndex - 1;
@@ -347,7 +373,7 @@ function initListeningRoomsSocket(io) {
         socket.on("remove-from-queue", ({ index }) => {
             if (!currentRoomCode) return;
             const room = activeRooms.get(currentRoomCode);
-            if (!room || room.hostId !== user.id) return;
+            if (!room || room.hostId?.toString() !== user.id?.toString()) return;
 
             if (index >= 0 && index < room.playback.queue.length) {
                 room.playback.queue.splice(index, 1);
@@ -363,7 +389,7 @@ function initListeningRoomsSocket(io) {
 
         // 11. SEND CHAT MESSAGE
         socket.on("send-message", ({ text }) => {
-            if (!currentRoomCode || !text) return;
+            if (!user || !currentRoomCode || !text) return;
             const room = activeRooms.get(currentRoomCode);
             if (!room) return;
 
@@ -389,7 +415,7 @@ function initListeningRoomsSocket(io) {
         // 12. SEND LIVE REACTION
         const VALID_EMOJIS = ["❤️", "😂", "🔥", "👏", "🎵", "🥹"];
         socket.on("send-reaction", ({ emoji }) => {
-            if (!currentRoomCode || !VALID_EMOJIS.includes(emoji)) return;
+            if (!user || !currentRoomCode || !VALID_EMOJIS.includes(emoji)) return;
 
             io.to(currentRoomCode).emit("receive-reaction", {
                 id: Date.now() + "_" + Math.random(),
@@ -412,18 +438,29 @@ function initListeningRoomsSocket(io) {
             room.participants.delete(socket.id);
             socket.leave(code);
 
-            socket.to(code).emit("user-left", {
-                userId: user.id,
-                username: user.username
-            });
+            if (user) {
+                socket.to(code).emit("user-left", {
+                    userId: user.id,
+                    username: user.username
+                });
+            }
 
             if (room.participants.size === 0) {
-                // Room is empty -> clean up
-                activeRooms.delete(code);
-                broadcastPublicRooms();
+                // Room is empty -> don't destroy immediately! Give a 2-minute grace period
+                // so React StrictMode remounts, page refreshes, and quick network reconnects don't delete the room.
+                if (room.cleanupTimer) {
+                    clearTimeout(room.cleanupTimer);
+                }
+                room.cleanupTimer = setTimeout(() => {
+                    const current = activeRooms.get(code);
+                    if (current && current.participants.size === 0) {
+                        activeRooms.delete(code);
+                        broadcastPublicRooms();
+                    }
+                }, 120000); // 2 minutes grace period
             } else {
                 // If the host left, transfer host role to the first remaining participant
-                if (room.hostId === user.id) {
+                if (user && room.hostId?.toString() === user.id?.toString()) {
                     const nextHost = room.participants.values().next().value;
                     if (nextHost) {
                         nextHost.isHost = true;
